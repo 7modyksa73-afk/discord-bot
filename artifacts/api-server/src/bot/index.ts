@@ -111,11 +111,6 @@ export function startBot(): void {
       message.channelId === config.broadcastChannelId
     ) {
       try {
-        const broadcastText =
-          `📢 **رسالة من ${message.guild?.name ?? "السيرفر"}**\n` +
-          `👤 ${message.member?.displayName ?? message.author.username}:\n\n` +
-          content;
-
         if (message.guild) {
           const members = await message.guild.members.fetch();
           let sent = 0;
@@ -123,7 +118,7 @@ export function startBot(): void {
           for (const [, member] of members) {
             if (member.user.bot) continue;
             try {
-              await member.send(broadcastText);
+              if (content) await member.send(content);
               if (message.attachments.size > 0) {
                 for (const [, att] of message.attachments) {
                   await member.send(att.url);
