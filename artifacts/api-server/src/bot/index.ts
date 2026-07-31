@@ -4,6 +4,7 @@ import {
   Partials,
   REST,
   Routes,
+  MessageFlags,
   type Message,
   type ChatInputCommandInteraction,
   type TextChannel,
@@ -184,7 +185,7 @@ export function startBot(): void {
         `• روم الصورة التلقائية: ${cfg.autoImageChannelId ? `<#${cfg.autoImageChannelId}>` : "❌ غير محدد"}`,
         `• صورة الروم التلقائي: ${cfg.autoImageUrl ? "✅ محددة" : "❌ غير محددة"}`,
       ];
-      await interaction.reply({ content: lines.join("\n"), ephemeral: true });
+      await interaction.reply({ content: lines.join("\n"), flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -196,7 +197,7 @@ export function startBot(): void {
       });
       await interaction.reply({
         content: `✅ تم تحديد <#${interaction.channelId}> كـ **روم البث**.\nأي رسالة تُكتب فيه ستُرسل لجميع الأعضاء عبر الخاص.`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -204,7 +205,7 @@ export function startBot(): void {
     // /removebroadcast
     if (commandName === "removebroadcast") {
       saveConfig({ broadcastChannelId: undefined, broadcastGuildId: undefined });
-      await interaction.reply({ content: "✅ تم إلغاء روم البث.", ephemeral: true });
+      await interaction.reply({ content: "✅ تم إلغاء روم البث.", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -214,14 +215,14 @@ export function startBot(): void {
       if (!url) {
         await interaction.reply({
           content: "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة في خانة `url`.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
       saveConfig({ khatImageUrl: url });
       await interaction.reply({
         content: "✅ تم تحديد صورة `/khat` و `-خط`.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -232,12 +233,12 @@ export function startBot(): void {
       if (!cfg.khatImageUrl) {
         await interaction.reply({
           content: "⚠️ لم يتم تحديد صورة بعد. استخدم `/setimage` أولاً.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
       // Reply ephemerally (only caller sees it) then send image publicly
-      await interaction.reply({ content: "✅", ephemeral: true });
+      await interaction.reply({ content: "✅", flags: MessageFlags.Ephemeral });
       await (interaction.channel as TextChannel).send({
         files: [cfg.khatImageUrl],
       });
@@ -252,7 +253,7 @@ export function startBot(): void {
       });
       await interaction.reply({
         content: `✅ تم تحديد <#${interaction.channelId}> كـ **روم الصورة التلقائية**.\nاستخدم \`/setautoimage\` لتحديد الصورة.`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -262,7 +263,7 @@ export function startBot(): void {
       saveConfig({ autoImageChannelId: undefined, autoImageGuildId: undefined });
       await interaction.reply({
         content: "✅ تم إلغاء روم الصورة التلقائية.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -273,39 +274,37 @@ export function startBot(): void {
       if (!url) {
         await interaction.reply({
           content: "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة في خانة `url`.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
       saveConfig({ autoImageUrl: url });
       await interaction.reply({
         content: "✅ تم تحديد صورة الروم التلقائية.",
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
-    // /say  — bot speaks, only caller sees the confirmation
+    // /say  — bot sends text, image, or both; only caller sees the ✅
     if (commandName === "say") {
-      const text = interaction.options.getString("text", true);
-      // Ephemeral ack so only the caller sees anything from the interaction
-      await interaction.reply({ content: "✅", ephemeral: true });
-      await (interaction.channel as TextChannel).send(text);
-      return;
-    }
+      const text = interaction.options.getString("text") ?? undefined;
+      const imageUrl = getImageFromInteraction(interaction);
 
-    // /sayimage — bot sends image, only caller sees the confirmation
-    if (commandName === "sayimage") {
-      const url = getImageFromInteraction(interaction);
-      if (!url) {
+      if (!text && !imageUrl) {
         await interaction.reply({
-          content: "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة في خانة `url`.",
-          ephemeral: true,
+          content: "❌ الرجاء كتابة نص أو إرفاق صورة أو كليهما.",
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
-      await interaction.reply({ content: "✅", ephemeral: true });
-      await (interaction.channel as TextChannel).send({ files: [url] });
+
+      await interaction.reply({ content: "✅", flags: MessageFlags.Ephemeral });
+
+      await (interaction.channel as TextChannel).send({
+        ...(text ? { content: text } : {}),
+        ...(imageUrl ? { files: [imageUrl] } : {}),
+      });
       return;
     }
   });

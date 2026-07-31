@@ -56,15 +56,10 @@ export const commands = [
   // ── البوت يتكلم بدون أثر ────────────────────────────
   new SlashCommandBuilder()
     .setName("say")
-    .setDescription("البوت يرسل نصاً في الروم بدون ما يُعرف أنك أعطيته أمراً")
+    .setDescription("البوت يرسل نص أو صورة أو كليهما بدون ما يُعرف أنك أعطيته أمراً")
     .addStringOption((opt) =>
-      opt.setName("text").setDescription("النص الذي سيرسله البوت").setRequired(true)
+      opt.setName("text").setDescription("النص الذي سيرسله البوت").setRequired(false)
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName("sayimage")
-    .setDescription("البوت يرسل صورة في الروم بدون ما يُعرف أنك أعطيته أمراً")
     .addStringOption((opt) =>
       opt.setName("url").setDescription("رابط الصورة").setRequired(false)
     )
