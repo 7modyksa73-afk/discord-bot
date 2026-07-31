@@ -2,43 +2,26 @@ import {
   Client,
   GatewayIntentBits,
   Partials,
+  REST,
+  Routes,
   type Message,
+  type ChatInputCommandInteraction,
   type TextChannel,
-  type DMChannel,
-  EmbedBuilder,
 } from "discord.js";
+import { commands } from "./commands.js";
 import { loadConfig, getConfig, saveConfig } from "./config.js";
 import { logger } from "../lib/logger.js";
 
-const ADMIN_COMMANDS = [
-  "!setbroadcast",
-  "!removebroadcast",
-  "!setimage",
-  "!setautoimagechannel",
-  "!removeautoimagechannel",
-  "!setautoimage",
-  "!say",
-  "!sayimage",
-  "!botstatus",
-];
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
-function isAdmin(message: Message): boolean {
-  if (!message.member) return false;
-  return (
-    message.member.permissions.has("Administrator") ||
-    message.member.permissions.has("ManageGuild") ||
-    message.member.permissions.has("ManageChannels")
-  );
-}
-
-function getImageUrl(message: Message, args: string[]): string | undefined {
-  // Check attachments first
-  const attachment = message.attachments.first();
+function getImageFromInteraction(
+  interaction: ChatInputCommandInteraction
+): string | undefined {
+  const attachment = interaction.options.getAttachment("image");
   if (attachment && attachment.contentType?.startsWith("image/")) {
     return attachment.url;
   }
-  // Then check args
-  const url = args[0];
+  const url = interaction.options.getString("url");
   if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
     return url;
   }
@@ -46,16 +29,13 @@ function getImageUrl(message: Message, args: string[]): string | undefined {
 }
 
 async function dmAllMembers(
-  message: Message,
+  interaction: ChatInputCommandInteraction,
   content: string
-): Promise<void> {
-  if (!message.guild) return;
-
-  // Fetch all members
-  const members = await message.guild.members.fetch();
+): Promise<{ sent: number; failed: number }> {
+  if (!interaction.guild) return { sent: 0, failed: 0 };
+  const members = await interaction.guild.members.fetch();
   let sent = 0;
   let failed = 0;
-
   for (const [, member] of members) {
     if (member.user.bot) continue;
     try {
@@ -65,11 +45,10 @@ async function dmAllMembers(
       failed++;
     }
   }
-
-  await message.channel.send(
-    `✅ تم الإرسال لـ **${sent}** عضو${failed > 0 ? ` (فشل: ${failed})` : ""}`
-  );
+  return { sent, failed };
 }
+
+// ─── bot bootstrap ────────────────────────────────────────────────────────────
 
 export function startBot(): void {
   const token = process.env["DISCORD_BOT_TOKEN"];
@@ -79,6 +58,16 @@ export function startBot(): void {
   }
 
   loadConfig();
+
+  // Register slash commands globally
+  const rest = new REST().setToken(token);
+  rest
+    .put(Routes.applicationCommands(process.env["DISCORD_CLIENT_ID"] ?? ""), {
+      body: commands,
+    })
+    .catch(() => {
+      // Client ID not set yet — will register after ready using client.user.id
+    });
 
   const client = new Client({
     intents: [
@@ -91,53 +80,74 @@ export function startBot(): void {
     partials: [Partials.Channel, Partials.Message],
   });
 
-  client.once("ready", () => {
-    logger.info({ tag: client.user?.tag }, "Discord bot is online");
+  // ── ready ──────────────────────────────────────────────────────────────────
+  client.once("clientReady", async (readyClient) => {
+    logger.info({ tag: readyClient.user.tag }, "Discord bot is online");
+
+    // Register slash commands now that we have the application ID
+    try {
+      await rest.put(Routes.applicationCommands(readyClient.user.id), {
+        body: commands,
+      });
+      logger.info("Slash commands registered globally");
+    } catch (err) {
+      logger.error({ err }, "Failed to register slash commands");
+    }
   });
 
+  // ── messageCreate — broadcast & auto-image & -خط text trigger ────────────
   client.on("messageCreate", async (message: Message) => {
-    // Ignore bot messages
     if (message.author.bot) return;
 
     const config = getConfig();
     const content = message.content.trim();
-    const isDM = message.channel.type === 1; // DMChannel
+    const isDM = message.channel.type === 1;
 
-    // ─── BROADCAST CHANNEL ───────────────────────────────────────────────────
-    // Any message in the broadcast channel → DM all members
+    // Broadcast channel
     if (
       !isDM &&
       config.broadcastChannelId &&
-      message.channelId === config.broadcastChannelId &&
-      !ADMIN_COMMANDS.some((cmd) => content.startsWith(cmd))
+      message.channelId === config.broadcastChannelId
     ) {
       try {
         const broadcastText =
           `📢 **رسالة من ${message.guild?.name ?? "السيرفر"}**\n` +
-          `👤 ${message.author.displayName ?? message.author.username}:\n\n` +
+          `👤 ${message.member?.displayName ?? message.author.username}:\n\n` +
           content;
 
-        await dmAllMembers(message, broadcastText);
-
-        // Also forward any images
-        if (message.attachments.size > 0) {
-          for (const [, att] of message.attachments) {
-            await dmAllMembers(message, att.url);
+        if (message.guild) {
+          const members = await message.guild.members.fetch();
+          let sent = 0;
+          let failed = 0;
+          for (const [, member] of members) {
+            if (member.user.bot) continue;
+            try {
+              await member.send(broadcastText);
+              if (message.attachments.size > 0) {
+                for (const [, att] of message.attachments) {
+                  await member.send(att.url);
+                }
+              }
+              sent++;
+            } catch {
+              failed++;
+            }
           }
+          await message.channel.send(
+            `✅ تم الإرسال لـ **${sent}** عضو${failed > 0 ? ` (تعذّر الإرسال لـ ${failed})` : ""}`
+          );
         }
       } catch (err) {
         logger.error({ err }, "Error broadcasting message");
       }
     }
 
-    // ─── AUTO-IMAGE CHANNEL ───────────────────────────────────────────────────
-    // Any message in the auto-image channel → send the configured image
+    // Auto-image channel
     if (
       !isDM &&
       config.autoImageChannelId &&
       message.channelId === config.autoImageChannelId &&
-      config.autoImageUrl &&
-      !ADMIN_COMMANDS.some((cmd) => content.startsWith(cmd))
+      config.autoImageUrl
     ) {
       try {
         await message.channel.send({ files: [config.autoImageUrl] });
@@ -146,7 +156,7 @@ export function startBot(): void {
       }
     }
 
-    // ─── -خط TRIGGER ─────────────────────────────────────────────────────────
+    // -خط text trigger (kept for convenience alongside /khat)
     if (content === "-خط" || content.startsWith("-خط ")) {
       if (config.khatImageUrl) {
         try {
@@ -154,139 +164,148 @@ export function startBot(): void {
         } catch (err) {
           logger.error({ err }, "Error sending khat image");
         }
-      } else {
-        await message.channel.send(
-          "⚠️ لم يتم تحديد صورة بعد. استخدم `!setimage <رابط_الصورة>`"
-        );
       }
-      return;
     }
+  });
 
-    // ─── ADMIN COMMANDS ───────────────────────────────────────────────────────
-    if (!content.startsWith("!")) return;
+  // ── interactionCreate — slash commands ────────────────────────────────────
+  client.on("interactionCreate", async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
 
-    const parts = content.split(/\s+/);
-    const cmd = parts[0]?.toLowerCase();
-    const args = parts.slice(1);
+    const { commandName } = interaction;
 
-    // --- !botstatus
-    if (cmd === "!botstatus") {
+    // /botstatus
+    if (commandName === "botstatus") {
       const cfg = getConfig();
       const lines = [
         "**⚙️ حالة البوت:**",
         `• روم البث: ${cfg.broadcastChannelId ? `<#${cfg.broadcastChannelId}>` : "❌ غير محدد"}`,
-        `• صورة -خط: ${cfg.khatImageUrl ? "✅ محددة" : "❌ غير محددة"}`,
+        `• صورة /khat أو -خط: ${cfg.khatImageUrl ? "✅ محددة" : "❌ غير محددة"}`,
         `• روم الصورة التلقائية: ${cfg.autoImageChannelId ? `<#${cfg.autoImageChannelId}>` : "❌ غير محدد"}`,
         `• صورة الروم التلقائي: ${cfg.autoImageUrl ? "✅ محددة" : "❌ غير محددة"}`,
       ];
-      await message.channel.send(lines.join("\n"));
+      await interaction.reply({ content: lines.join("\n"), ephemeral: true });
       return;
     }
 
-    // All commands below require admin
-    if (!isAdmin(message)) {
-      await message.reply("❌ هذا الأمر للمشرفين فقط.");
-      return;
-    }
-
-    // --- !setbroadcast
-    if (cmd === "!setbroadcast") {
+    // /setbroadcast
+    if (commandName === "setbroadcast") {
       saveConfig({
-        broadcastChannelId: message.channelId,
-        broadcastGuildId: message.guildId ?? undefined,
+        broadcastChannelId: interaction.channelId,
+        broadcastGuildId: interaction.guildId ?? undefined,
       });
-      await message.reply(
-        `✅ تم تحديد هذا الروم كـ **روم البث**.\nأي رسالة تُكتب هنا ستُرسل لجميع الأعضاء عبر الخاص.`
-      );
+      await interaction.reply({
+        content: `✅ تم تحديد <#${interaction.channelId}> كـ **روم البث**.\nأي رسالة تُكتب فيه ستُرسل لجميع الأعضاء عبر الخاص.`,
+        ephemeral: true,
+      });
       return;
     }
 
-    // --- !removebroadcast
-    if (cmd === "!removebroadcast") {
+    // /removebroadcast
+    if (commandName === "removebroadcast") {
       saveConfig({ broadcastChannelId: undefined, broadcastGuildId: undefined });
-      await message.reply("✅ تم إلغاء روم البث.");
+      await interaction.reply({ content: "✅ تم إلغاء روم البث.", ephemeral: true });
       return;
     }
 
-    // --- !setimage <url>
-    if (cmd === "!setimage") {
-      const url = getImageUrl(message, args);
+    // /setimage
+    if (commandName === "setimage") {
+      const url = getImageFromInteraction(interaction);
       if (!url) {
-        await message.reply(
-          "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة.\nمثال: `!setimage https://...`"
-        );
+        await interaction.reply({
+          content: "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة في خانة `url`.",
+          ephemeral: true,
+        });
         return;
       }
       saveConfig({ khatImageUrl: url });
-      await message.reply(`✅ تم تحديد صورة \`-خط\`.\nسترسل هذه الصورة عند كتابة \`-خط\` في أي روم.`);
-      return;
-    }
-
-    // --- !setautoimagechannel
-    if (cmd === "!setautoimagechannel") {
-      saveConfig({
-        autoImageChannelId: message.channelId,
-        autoImageGuildId: message.guildId ?? undefined,
+      await interaction.reply({
+        content: "✅ تم تحديد صورة `/khat` و `-خط`.",
+        ephemeral: true,
       });
-      await message.reply(
-        `✅ تم تحديد هذا الروم كـ **روم الصورة التلقائية**.\nأي رسالة تُكتب هنا ستُرسل الصورة المحددة تلقائياً.\nاستخدم \`!setautoimage <رابط>\` لتحديد الصورة.`
-      );
       return;
     }
 
-    // --- !removeautoimagechannel
-    if (cmd === "!removeautoimagechannel") {
+    // /khat
+    if (commandName === "khat") {
+      const cfg = getConfig();
+      if (!cfg.khatImageUrl) {
+        await interaction.reply({
+          content: "⚠️ لم يتم تحديد صورة بعد. استخدم `/setimage` أولاً.",
+          ephemeral: true,
+        });
+        return;
+      }
+      // Reply ephemerally (only caller sees it) then send image publicly
+      await interaction.reply({ content: "✅", ephemeral: true });
+      await (interaction.channel as TextChannel).send({
+        files: [cfg.khatImageUrl],
+      });
+      return;
+    }
+
+    // /setautoimagechannel
+    if (commandName === "setautoimagechannel") {
+      saveConfig({
+        autoImageChannelId: interaction.channelId,
+        autoImageGuildId: interaction.guildId ?? undefined,
+      });
+      await interaction.reply({
+        content: `✅ تم تحديد <#${interaction.channelId}> كـ **روم الصورة التلقائية**.\nاستخدم \`/setautoimage\` لتحديد الصورة.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    // /removeautoimagechannel
+    if (commandName === "removeautoimagechannel") {
       saveConfig({ autoImageChannelId: undefined, autoImageGuildId: undefined });
-      await message.reply("✅ تم إلغاء روم الصورة التلقائية.");
+      await interaction.reply({
+        content: "✅ تم إلغاء روم الصورة التلقائية.",
+        ephemeral: true,
+      });
       return;
     }
 
-    // --- !setautoimage <url>
-    if (cmd === "!setautoimage") {
-      const url = getImageUrl(message, args);
+    // /setautoimage
+    if (commandName === "setautoimage") {
+      const url = getImageFromInteraction(interaction);
       if (!url) {
-        await message.reply(
-          "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة.\nمثال: `!setautoimage https://...`"
-        );
+        await interaction.reply({
+          content: "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة في خانة `url`.",
+          ephemeral: true,
+        });
         return;
       }
       saveConfig({ autoImageUrl: url });
-      await message.reply(`✅ تم تحديد صورة الروم التلقائية.`);
+      await interaction.reply({
+        content: "✅ تم تحديد صورة الروم التلقائية.",
+        ephemeral: true,
+      });
       return;
     }
 
-    // --- !say <text>  (bot speaks without command indicator)
-    if (cmd === "!say") {
-      const text = args.join(" ");
-      if (!text) {
-        await message.reply("❌ اكتب النص بعد الأمر.\nمثال: `!say مرحبا بالجميع`");
-        return;
-      }
-      try {
-        // Delete the original command message so it looks invisible
-        await message.delete();
-      } catch {
-        /* no permission to delete — ignore */
-      }
-      await message.channel.send(text);
+    // /say  — bot speaks, only caller sees the confirmation
+    if (commandName === "say") {
+      const text = interaction.options.getString("text", true);
+      // Ephemeral ack so only the caller sees anything from the interaction
+      await interaction.reply({ content: "✅", ephemeral: true });
+      await (interaction.channel as TextChannel).send(text);
       return;
     }
 
-    // --- !sayimage <url>  (bot sends image without command indicator)
-    if (cmd === "!sayimage") {
-      const url = getImageUrl(message, args);
+    // /sayimage — bot sends image, only caller sees the confirmation
+    if (commandName === "sayimage") {
+      const url = getImageFromInteraction(interaction);
       if (!url) {
-        await message.reply(
-          "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة.\nمثال: `!sayimage https://...`"
-        );
+        await interaction.reply({
+          content: "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة في خانة `url`.",
+          ephemeral: true,
+        });
         return;
       }
-      try {
-        await message.delete();
-      } catch {
-        /* no permission to delete — ignore */
-      }
-      await message.channel.send({ files: [url] });
+      await interaction.reply({ content: "✅", ephemeral: true });
+      await (interaction.channel as TextChannel).send({ files: [url] });
       return;
     }
   });
