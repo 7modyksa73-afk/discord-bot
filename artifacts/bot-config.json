@@ -2,5 +2,8 @@
   "khatImageUrl": "https://cdn.discordapp.com/ephemeral-attachments/1532561160837005561/1532561786933346386/Picsart_26-07-31_03-29-58-499.png?ex=6a6d4ce3&is=6a6bfb63&hm=4135de78b472bc53ec68bc06b1c5325ede8c54a1a86f933ddfb6fc463db22bc7&",
   "autoImageUrl": "https://cdn.discordapp.com/ephemeral-attachments/1532561160837005567/1532562279713996810/Picsart_26-07-31_03-29-58-499.png?ex=6a6d4d59&is=6a6bfbd9&hm=55df179291e2455f5006d16b9b010a2616b539499e23db7ba651f2c4687da4c4&",
   "broadcastChannelId": "1532467537583804487",
-  "broadcastGuildId": "1517661605930729512"
+  "broadcastGuildId": "1517661605930729512",
+  "reviewChannelId": "1532467591233147223",
+  "reviewGuildId": "1517661605930729512",
+  "reviewWebhookUrl": "https://discord.com/api/webhooks/1532566264982016090/Wi9Pg7IRF1teabCBBP82X-NJSYBFdTd78YXY_3pHYi9M3E62PEfSmfTyDVodd5sOozm8"
 }
