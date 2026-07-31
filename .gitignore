@@ -47,3 +47,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Bot runtime config (يتولد تلقائياً عند تشغيل البوت)
+artifacts/api-server/bot-config.json
