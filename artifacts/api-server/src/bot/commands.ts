@@ -68,6 +68,17 @@ export const commands = [
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  // ── روم التقييم ──────────────────────────────────────
+  new SlashCommandBuilder()
+    .setName("setreviewchannel")
+    .setDescription("حدد الروم الحالي كروم تقييم — أي رسالة تُكتب فيه تظهر أزرار النجوم")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName("removereviewchannel")
+    .setDescription("ألغِ روم التقييم")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
   // ── الحالة ───────────────────────────────────────────
   new SlashCommandBuilder()
     .setName("botstatus")

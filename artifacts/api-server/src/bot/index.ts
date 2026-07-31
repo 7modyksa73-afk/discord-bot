@@ -5,13 +5,33 @@ import {
   REST,
   Routes,
   MessageFlags,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  WebhookClient,
   type Message,
   type ChatInputCommandInteraction,
   type TextChannel,
+  type ButtonInteraction,
 } from "discord.js";
 import { commands } from "./commands.js";
 import { loadConfig, getConfig, saveConfig } from "./config.js";
 import { logger } from "../lib/logger.js";
+
+// ─── rating state ─────────────────────────────────────────────────────────────
+
+interface PendingRating {
+  reviewMessage: Message;
+  botMessage: Message;
+  timeout: ReturnType<typeof setTimeout>;
+  authorId: string;
+  authorName: string;
+  authorAvatar: string;
+  content: string;
+}
+
+const pendingRatings = new Map<string, PendingRating>();
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -29,24 +49,41 @@ function getImageFromInteraction(
   return undefined;
 }
 
-async function dmAllMembers(
-  interaction: ChatInputCommandInteraction,
-  content: string
-): Promise<{ sent: number; failed: number }> {
-  if (!interaction.guild) return { sent: 0, failed: 0 };
-  const members = await interaction.guild.members.fetch();
-  let sent = 0;
-  let failed = 0;
-  for (const [, member] of members) {
-    if (member.user.bot) continue;
-    try {
-      await member.send(content);
-      sent++;
-    } catch {
-      failed++;
-    }
+function buildStarRow(reviewMsgId: string): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`rating_1_${reviewMsgId}`)
+      .setLabel("⭐")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`rating_2_${reviewMsgId}`)
+      .setLabel("⭐⭐")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`rating_3_${reviewMsgId}`)
+      .setLabel("⭐⭐⭐")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`rating_4_${reviewMsgId}`)
+      .setLabel("⭐⭐⭐⭐")
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`rating_5_${reviewMsgId}`)
+      .setLabel("⭐⭐⭐⭐⭐")
+      .setStyle(ButtonStyle.Secondary)
+  );
+}
+
+function starsLabel(n: number): string {
+  return "⭐".repeat(n);
+}
+
+async function safeDelete(msg: Message): Promise<void> {
+  try {
+    await msg.delete();
+  } catch {
+    /* already deleted or no permission */
   }
-  return { sent, failed };
 }
 
 // ─── bot bootstrap ────────────────────────────────────────────────────────────
@@ -60,15 +97,7 @@ export function startBot(): void {
 
   loadConfig();
 
-  // Register slash commands globally
   const rest = new REST().setToken(token);
-  rest
-    .put(Routes.applicationCommands(process.env["DISCORD_CLIENT_ID"] ?? ""), {
-      body: commands,
-    })
-    .catch(() => {
-      // Client ID not set yet — will register after ready using client.user.id
-    });
 
   const client = new Client({
     intents: [
@@ -84,8 +113,6 @@ export function startBot(): void {
   // ── ready ──────────────────────────────────────────────────────────────────
   client.once("clientReady", async (readyClient) => {
     logger.info({ tag: readyClient.user.tag }, "Discord bot is online");
-
-    // Register slash commands now that we have the application ID
     try {
       await rest.put(Routes.applicationCommands(readyClient.user.id), {
         body: commands,
@@ -96,7 +123,7 @@ export function startBot(): void {
     }
   });
 
-  // ── messageCreate — broadcast & auto-image & -خط text trigger ────────────
+  // ── messageCreate ─────────────────────────────────────────────────────────
   client.on("messageCreate", async (message: Message) => {
     if (message.author.bot) return;
 
@@ -104,7 +131,7 @@ export function startBot(): void {
     const content = message.content.trim();
     const isDM = message.channel.type === 1;
 
-    // Broadcast channel
+    // ── Broadcast channel ────────────────────────────────────────────────────
     if (
       !isDM &&
       config.broadcastChannelId &&
@@ -119,10 +146,8 @@ export function startBot(): void {
             if (member.user.bot) continue;
             try {
               if (content) await member.send(content);
-              if (message.attachments.size > 0) {
-                for (const [, att] of message.attachments) {
-                  await member.send(att.url);
-                }
+              for (const [, att] of message.attachments) {
+                await member.send(att.url);
               }
               sent++;
             } catch {
@@ -138,7 +163,7 @@ export function startBot(): void {
       }
     }
 
-    // Auto-image channel
+    // ── Auto-image channel ───────────────────────────────────────────────────
     if (
       !isDM &&
       config.autoImageChannelId &&
@@ -152,11 +177,46 @@ export function startBot(): void {
       }
     }
 
-    // -خط text trigger (kept for convenience alongside /khat)
+    // ── Review channel ───────────────────────────────────────────────────────
+    if (
+      !isDM &&
+      config.reviewChannelId &&
+      message.channelId === config.reviewChannelId
+    ) {
+      try {
+        const row = buildStarRow(message.id);
+        const botMsg = await message.channel.send({
+          content: `**التقييم** — <@${message.author.id}>، اختر عدد النجوم:`,
+          components: [row],
+        });
+
+        const timeout = setTimeout(async () => {
+          pendingRatings.delete(message.id);
+          await safeDelete(message);
+          await safeDelete(botMsg);
+        }, 10_000);
+
+        pendingRatings.set(message.id, {
+          reviewMessage: message,
+          botMessage: botMsg,
+          timeout,
+          authorId: message.author.id,
+          authorName: message.member?.displayName ?? message.author.username,
+          authorAvatar:
+            message.author.displayAvatarURL({ size: 128 }),
+          content,
+        });
+      } catch (err) {
+        logger.error({ err }, "Error handling review channel message");
+      }
+    }
+
+    // ── -خط text trigger ─────────────────────────────────────────────────────
     if (content === "-خط" || content.startsWith("-خط ")) {
-      if (config.khatImageUrl) {
+      const cfg = getConfig();
+      if (cfg.khatImageUrl) {
         try {
-          await message.channel.send({ files: [config.khatImageUrl] });
+          await message.channel.send({ files: [cfg.khatImageUrl] });
         } catch (err) {
           logger.error({ err }, "Error sending khat image");
         }
@@ -164,10 +224,80 @@ export function startBot(): void {
     }
   });
 
-  // ── interactionCreate — slash commands ────────────────────────────────────
+  // ── interactionCreate ─────────────────────────────────────────────────────
   client.on("interactionCreate", async (interaction) => {
-    if (!interaction.isChatInputCommand()) return;
+    // ── Button: star rating ─────────────────────────────────────────────────
+    if (interaction.isButton()) {
+      const btn = interaction as ButtonInteraction;
+      const customId = btn.customId; // e.g. "rating_3_1234567890"
 
+      if (customId.startsWith("rating_")) {
+        const parts = customId.split("_");
+        const stars = parseInt(parts[1] ?? "0", 10);
+        const reviewMsgId = parts.slice(2).join("_");
+        const pending = pendingRatings.get(reviewMsgId);
+
+        if (!pending) {
+          // Expired — silently ack
+          await btn.deferUpdate().catch(() => undefined);
+          return;
+        }
+
+        // Only the original author can rate
+        if (btn.user.id !== pending.authorId) {
+          await btn.reply({
+            content: "❌ فقط صاحب الرسالة يقدر يختار التقييم.",
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        clearTimeout(pending.timeout);
+        pendingRatings.delete(reviewMsgId);
+
+        await btn.deferUpdate().catch(() => undefined);
+
+        // Delete both original messages
+        await safeDelete(pending.reviewMessage);
+        await safeDelete(pending.botMessage);
+
+        // Build embed
+        const embed = new EmbedBuilder()
+          .setDescription(pending.content)
+          .setColor(0xf5c518)
+          .addFields({
+            name: "التقييم",
+            value: `${starsLabel(stars)} **(${stars}/5)**`,
+          })
+          .setTimestamp();
+
+        // Send via webhook to impersonate the reviewer
+        const config = getConfig();
+        if (config.reviewWebhookUrl) {
+          try {
+            const wh = new WebhookClient({ url: config.reviewWebhookUrl });
+            await wh.send({
+              username: pending.authorName,
+              avatarURL: pending.authorAvatar,
+              embeds: [embed],
+            });
+            return;
+          } catch (err) {
+            logger.error({ err }, "Webhook send failed, falling back to normal send");
+          }
+        }
+
+        // Fallback: normal embed with author info
+        embed.setAuthor({
+          name: pending.authorName,
+          iconURL: pending.authorAvatar,
+        });
+        await (btn.channel as TextChannel).send({ embeds: [embed] });
+        return;
+      }
+    }
+
+    if (!interaction.isChatInputCommand()) return;
     const { commandName } = interaction;
 
     // /botstatus
@@ -179,6 +309,7 @@ export function startBot(): void {
         `• صورة /khat أو -خط: ${cfg.khatImageUrl ? "✅ محددة" : "❌ غير محددة"}`,
         `• روم الصورة التلقائية: ${cfg.autoImageChannelId ? `<#${cfg.autoImageChannelId}>` : "❌ غير محدد"}`,
         `• صورة الروم التلقائي: ${cfg.autoImageUrl ? "✅ محددة" : "❌ غير محددة"}`,
+        `• روم التقييم: ${cfg.reviewChannelId ? `<#${cfg.reviewChannelId}>` : "❌ غير محدد"}`,
       ];
       await interaction.reply({ content: lines.join("\n"), flags: MessageFlags.Ephemeral });
       return;
@@ -191,7 +322,7 @@ export function startBot(): void {
         broadcastGuildId: interaction.guildId ?? undefined,
       });
       await interaction.reply({
-        content: `✅ تم تحديد <#${interaction.channelId}> كـ **روم البث**.\nأي رسالة تُكتب فيه ستُرسل لجميع الأعضاء عبر الخاص.`,
+        content: `✅ تم تحديد <#${interaction.channelId}> كـ **روم البث**.`,
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -209,16 +340,13 @@ export function startBot(): void {
       const url = getImageFromInteraction(interaction);
       if (!url) {
         await interaction.reply({
-          content: "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة في خانة `url`.",
+          content: "❌ الرجاء إرفاق صورة أو كتابة رابط في خانة `url`.",
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
       saveConfig({ khatImageUrl: url });
-      await interaction.reply({
-        content: "✅ تم تحديد صورة `/khat` و `-خط`.",
-        flags: MessageFlags.Ephemeral,
-      });
+      await interaction.reply({ content: "✅ تم تحديد صورة `/khat` و `-خط`.", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -227,16 +355,13 @@ export function startBot(): void {
       const cfg = getConfig();
       if (!cfg.khatImageUrl) {
         await interaction.reply({
-          content: "⚠️ لم يتم تحديد صورة بعد. استخدم `/setimage` أولاً.",
+          content: "⚠️ لم يتم تحديد صورة. استخدم `/setimage` أولاً.",
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
-      // Reply ephemerally (only caller sees it) then send image publicly
       await interaction.reply({ content: "✅", flags: MessageFlags.Ephemeral });
-      await (interaction.channel as TextChannel).send({
-        files: [cfg.khatImageUrl],
-      });
+      await (interaction.channel as TextChannel).send({ files: [cfg.khatImageUrl] });
       return;
     }
 
@@ -247,7 +372,7 @@ export function startBot(): void {
         autoImageGuildId: interaction.guildId ?? undefined,
       });
       await interaction.reply({
-        content: `✅ تم تحديد <#${interaction.channelId}> كـ **روم الصورة التلقائية**.\nاستخدم \`/setautoimage\` لتحديد الصورة.`,
+        content: `✅ تم تحديد <#${interaction.channelId}> كـ **روم الصورة التلقائية**.`,
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -256,10 +381,7 @@ export function startBot(): void {
     // /removeautoimagechannel
     if (commandName === "removeautoimagechannel") {
       saveConfig({ autoImageChannelId: undefined, autoImageGuildId: undefined });
-      await interaction.reply({
-        content: "✅ تم إلغاء روم الصورة التلقائية.",
-        flags: MessageFlags.Ephemeral,
-      });
+      await interaction.reply({ content: "✅ تم إلغاء روم الصورة التلقائية.", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -268,24 +390,20 @@ export function startBot(): void {
       const url = getImageFromInteraction(interaction);
       if (!url) {
         await interaction.reply({
-          content: "❌ الرجاء إرفاق صورة أو كتابة رابط الصورة في خانة `url`.",
+          content: "❌ الرجاء إرفاق صورة أو كتابة رابط في خانة `url`.",
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
       saveConfig({ autoImageUrl: url });
-      await interaction.reply({
-        content: "✅ تم تحديد صورة الروم التلقائية.",
-        flags: MessageFlags.Ephemeral,
-      });
+      await interaction.reply({ content: "✅ تم تحديد صورة الروم التلقائية.", flags: MessageFlags.Ephemeral });
       return;
     }
 
-    // /say  — bot sends text, image, or both; only caller sees the ✅
+    // /say
     if (commandName === "say") {
       const text = interaction.options.getString("text") ?? undefined;
       const imageUrl = getImageFromInteraction(interaction);
-
       if (!text && !imageUrl) {
         await interaction.reply({
           content: "❌ الرجاء كتابة نص أو إرفاق صورة أو كليهما.",
@@ -293,13 +411,65 @@ export function startBot(): void {
         });
         return;
       }
-
       await interaction.reply({ content: "✅", flags: MessageFlags.Ephemeral });
-
       await (interaction.channel as TextChannel).send({
         ...(text ? { content: text } : {}),
         ...(imageUrl ? { files: [imageUrl] } : {}),
       });
+      return;
+    }
+
+    // /sayimage
+    if (commandName === "sayimage") {
+      const url = getImageFromInteraction(interaction);
+      if (!url) {
+        await interaction.reply({
+          content: "❌ الرجاء إرفاق صورة أو كتابة رابط في خانة `url`.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      await interaction.reply({ content: "✅", flags: MessageFlags.Ephemeral });
+      await (interaction.channel as TextChannel).send({ files: [url] });
+      return;
+    }
+
+    // /setreviewchannel
+    if (commandName === "setreviewchannel") {
+      const channel = interaction.channel as TextChannel;
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      try {
+        // Create a webhook for impersonation
+        const webhook = await channel.createWebhook({
+          name: "Review Bot",
+          reason: "تقييمات البوت",
+        });
+        saveConfig({
+          reviewChannelId: interaction.channelId,
+          reviewGuildId: interaction.guildId ?? undefined,
+          reviewWebhookUrl: webhook.url,
+        });
+        await interaction.editReply(
+          `✅ تم تحديد <#${interaction.channelId}> كـ **روم التقييم**.\nأي رسالة تُكتب فيه ستظهر أزرار النجوم (⭐ إلى ⭐⭐⭐⭐⭐).`
+        );
+      } catch (err) {
+        logger.error({ err }, "Failed to create webhook");
+        await interaction.editReply(
+          "❌ فشل إنشاء الـ webhook. تأكد أن البوت يملك صلاحية **Manage Webhooks** في هذا الروم."
+        );
+      }
+      return;
+    }
+
+    // /removereviewchannel
+    if (commandName === "removereviewchannel") {
+      saveConfig({
+        reviewChannelId: undefined,
+        reviewGuildId: undefined,
+        reviewWebhookUrl: undefined,
+      });
+      await interaction.reply({ content: "✅ تم إلغاء روم التقييم.", flags: MessageFlags.Ephemeral });
       return;
     }
   });

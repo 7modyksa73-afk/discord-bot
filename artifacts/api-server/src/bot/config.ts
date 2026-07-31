@@ -17,6 +17,11 @@ export interface BotConfig {
   autoImageChannelId?: string;
   autoImageGuildId?: string;
   autoImageUrl?: string;
+
+  // Review channel: any message → star rating buttons → embed via webhook
+  reviewChannelId?: string;
+  reviewGuildId?: string;
+  reviewWebhookUrl?: string;
 }
 
 let config: BotConfig = {};
